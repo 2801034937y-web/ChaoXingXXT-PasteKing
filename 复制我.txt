@@ -1,0 +1,305 @@
+(() => {
+  "use strict";
+
+  const CFG = {
+    mode: "type",
+    charDelay: 0,
+    fireKeys: true,
+    clearFirst: true,
+    highlight: true
+  };
+
+  const LS_KEY = "__dsh_last_text__";
+
+  const tag = "%c[填字]";
+  const stl = "color:#fff;background:#0a84ff;padding:1px 5px;border-radius:3px";
+  const log = (...a) => console.log(tag, stl, ...a);
+  const warn = (...a) => console.warn(tag, stl, ...a);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function allDocs() {
+    const out = [{ doc: document, frame: null }];
+    for (let i = 0; i < out.length && i < 20; i++) {
+      let frames = [];
+      try { frames = out[i].doc.querySelectorAll("iframe"); } catch (e) { continue; }
+      for (const f of frames) {
+        try { if (f.contentDocument) out.push({ doc: f.contentDocument, frame: f }); } catch (e) {}
+      }
+    }
+    return out;
+  }
+
+  function visible(el) {
+    if (!el || !el.isConnected) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 40 || r.height < 16) return false;
+    const s = (el.ownerDocument.defaultView || window).getComputedStyle(el);
+    if (s.display === "none" || s.visibility === "hidden" || s.opacity === "0") return false;
+    return true;
+  }
+
+  function pickEditor() {
+    const cands = [];
+    for (const { doc: d, frame } of allDocs()) {
+      let nodes = [];
+      try {
+        nodes = d.querySelectorAll('[contenteditable="true"], textarea');
+      } catch (e) { continue; }
+      for (const el of nodes) {
+        const isCE = el.getAttribute && el.getAttribute("contenteditable") === "true";
+        const isTA = el.tagName === "TEXTAREA";
+        if (!isCE && !isTA) continue;
+        if (!visible(el)) continue;
+
+        const r = el.getBoundingClientRect();
+        let score = r.width * r.height;
+        const idc = (el.id + " " + el.className + " " +
+          (el.closest ? (el.closest("[id],[class]") ? el.closest("[id],[class]").className : "") : ""))
+          .toLowerCase();
+        if (/answer|homework|work|content|editor|ueditor|uedit|cke|tinymce|submit/.test(idc)) score *= 6;
+        if (/search|login|user|name|phone|comment|souti|tiku/.test(idc)) score *= 0.02;
+
+        if (frame) {
+          const fid = ((frame.id || "") + " " + (frame.className || "")).toLowerCase();
+          if (/ueditor|edui/.test(fid)) score *= 20;
+          else score *= 0.3;
+        }
+
+        if (el.readOnly || el.disabled) continue;
+        cands.push({ el, score, kind: isCE ? "contenteditable" : "textarea", doc: d });
+      }
+    }
+    cands.sort((a, b) => b.score - a.score);
+    return cands;
+  }
+
+  function caretToEnd(el, doc) {
+    try {
+      const sel = doc.getSelection ? doc.getSelection() : window.getSelection();
+      if (!sel) return;
+      const r = doc.createRange();
+      r.selectNodeContents(el);
+      r.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } catch (e) {}
+  }
+
+  function fireKey(el, type, ch, code) {
+    if (!CFG.fireKeys) return;
+    try {
+      el.dispatchEvent(new KeyboardEvent(type, {
+        key: ch, code: ch, keyCode: code, which: code,
+        charCode: type === "keypress" ? code : 0,
+        bubbles: true, cancelable: true, composed: true
+      }));
+    } catch (e) {}
+  }
+
+  function clearEditor(el, kind, doc) {
+    try {
+      if (kind === "contenteditable") {
+        el.focus();
+        const sel = doc.getSelection ? doc.getSelection() : window.getSelection();
+        const r = doc.createRange();
+        r.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(r);
+        doc.execCommand("delete", false, null);
+        if (el.textContent.trim().length) el.innerHTML = "";
+      } else {
+        const setter = Object.getOwnPropertyDescriptor(
+          el.ownerDocument.defaultView.HTMLTextAreaElement.prototype, "value"
+        ).set;
+        setter.call(el, "");
+      }
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    } catch (e) {}
+  }
+
+  function currentLength(el, kind) {
+    const t = kind === "contenteditable" ? el.innerText : el.value;
+    return (t || "").replace(/\s/g, "").length;
+  }
+
+  async function fill(cand, TEXT) {
+    const { el, kind } = cand;
+    const doc = el.ownerDocument || document;
+
+    if (CFG.clearFirst) clearEditor(el, kind, doc);
+    el.focus();
+    if (kind === "contenteditable") caretToEnd(el, doc);
+
+    if (CFG.mode === "paste") {
+      const ok = (() => {
+        try { return doc.execCommand("insertText", false, TEXT); } catch (e) { return false; }
+      })();
+      if (!ok) {
+        if (kind === "contenteditable") {
+          el.innerHTML = TEXT.split(/\n+/).map((p) => "<p>" + p + "</p>").join("");
+        } else {
+          const setter = Object.getOwnPropertyDescriptor(
+            el.ownerDocument.defaultView.HTMLTextAreaElement.prototype, "value"
+          ).set;
+          setter.call(el, TEXT);
+        }
+      }
+    } else {
+      const chars = Array.from(TEXT);
+      for (let i = 0; i < chars.length; i++) {
+        const ch = chars[i];
+        if (ch === "\n") {
+          fireKey(el, "keydown", "Enter", 13);
+          try { doc.execCommand("insertParagraph", false, null) || doc.execCommand("insertLineBreak", false, null); }
+          catch (e) { try { doc.execCommand("insertHTML", false, "<br>"); } catch (e2) {} }
+          fireKey(el, "keyup", "Enter", 13);
+        } else {
+          const code = ch.charCodeAt(0);
+          fireKey(el, "keydown", ch, 229);
+          fireKey(el, "keypress", ch, code);
+          let ok = false;
+          try { ok = doc.execCommand("insertText", false, ch); } catch (e) { ok = false; }
+          if (!ok) {
+            if (kind === "contenteditable") el.appendChild(doc.createTextNode(ch));
+            else el.value += ch;
+            el.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch, inputType: "insertText" }));
+          }
+          fireKey(el, "keyup", ch, 229);
+        }
+        if (CFG.charDelay) await sleep(CFG.charDelay);
+      }
+    }
+
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    try {
+      if (window.jQuery) window.jQuery(el).trigger("input").trigger("change").trigger("keyup").trigger("blur");
+    } catch (e) {}
+
+    return currentLength(el, kind);
+  }
+
+  async function run(text) {
+    const want = String(text || "").replace(/\s/g, "").length;
+    if (!want) return { ok: false, msg: "内容是空的" };
+
+    const cands = pickEditor();
+    if (!cands.length) {
+      return {
+        ok: false,
+        msg: "没找到答题框。先点开作业编辑界面，用鼠标点一下输入框，再试一次。",
+        frames: Array.from(document.querySelectorAll("iframe"))
+          .map((f) => "#" + (f.id || "?") + (f.className ? "." + String(f.className).split(" ")[0] : ""))
+      };
+    }
+
+    const target = cands[0];
+    log("找到 " + cands.length + " 个候选框，选中：" + target.kind, target.el);
+
+    if (CFG.highlight) {
+      target.el.style.outline = "3px solid #ff3b30";
+      target.el.style.outlineOffset = "2px";
+    }
+
+    const n = await fill(target, String(text));
+    await sleep(200);
+    const final = currentLength(target.el, target.kind);
+    const ok = final >= want * 0.9;
+    if (ok) log("✅ 成功：答题框里现在有 " + final + " 个字（目标 " + want + "）");
+    else warn("⚠️ 只写进去 " + final + " / " + want + " 个字。把 CFG.mode 改成 \"paste\" 再试。");
+
+    return { ok, chars: final, want, target: target.el };
+  }
+
+  function buildPanel() {
+    const old = document.getElementById("__dsh_fill_host__");
+    if (old) old.remove();
+
+    const host = document.createElement("div");
+    host.id = "__dsh_fill_host__";
+    host.style.cssText = "position:fixed;right:18px;bottom:18px;z-index:2147483647;";
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <style>
+        *{box-sizing:border-box;font-family:"Microsoft YaHei",system-ui,sans-serif}
+        .p{width:320px;background:#fff;border:1px solid #d0d5dd;border-radius:10px;
+           box-shadow:0 8px 28px rgba(0,0,0,.22);overflow:hidden;color:#1f2937}
+        .hd{display:flex;justify-content:space-between;align-items:center;padding:9px 12px;
+            background:#0a84ff;color:#fff;font-size:13px;font-weight:600;cursor:move;user-select:none}
+        .x{cursor:pointer;font-size:15px;line-height:1;padding:0 3px;opacity:.9}
+        .x:hover{opacity:1}
+        textarea{width:100%;height:110px;border:0;border-bottom:1px solid #eaecf0;padding:10px 12px;
+                 font-size:13px;line-height:1.6;resize:vertical;outline:none;display:block}
+        .ft{display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:#fafbfc}
+        .c{font-size:12px;color:#667085}
+        button{border:0;border-radius:6px;padding:7px 16px;font-size:13px;font-weight:600;
+               cursor:pointer;background:#0a84ff;color:#fff}
+        button:hover{background:#0873dd}
+        button:disabled{background:#c7cdd6;cursor:not-allowed}
+        .m{padding:0 12px 10px;font-size:12px;line-height:1.5;display:none}
+        .m.s{display:block;color:#0a7d33}
+        .m.e{display:block;color:#c0392b}
+      </style>
+      <div class="p">
+        <div class="hd"><span>粘贴王</span><span class="x">✕</span></div>
+        <textarea placeholder="先粘贴到这里，然后点「填入」…"></textarea>
+        <div class="ft"><span class="c">0 字</span><button class="go">填 入</button></div>
+        <div class="m"></div>
+      </div>`;
+
+    const $ = (s) => root.querySelector(s);
+    const ta = $("textarea"), cnt = $(".c"), msg = $(".m"), go = $("button.go");
+
+    try {
+      const last = localStorage.getItem(LS_KEY);
+      if (last) { ta.value = last; }
+    } catch (e) {}
+    const refresh = () => { cnt.textContent = ta.value.replace(/\s/g, "").length + " 字"; };
+    refresh();
+    ta.addEventListener("input", refresh);
+    ta.addEventListener("paste", () => setTimeout(refresh, 0));
+
+    go.addEventListener("click", async () => {
+      const text = ta.value;
+      go.disabled = true;
+      msg.className = "m";
+      const r = await run(text);
+      go.disabled = false;
+      if (r.ok) {
+        try { localStorage.setItem(LS_KEY, text); } catch (e) {}
+        msg.className = "m s";
+        msg.textContent = "✅ 已填入 " + r.chars + " 字。请自己通读一遍，再手动点【提交】。";
+      } else {
+        msg.className = "m e";
+        msg.textContent = "⚠️ " + r.msg + (r.frames ? "（iframe: " + r.frames.join(" ") + "）" : "");
+      }
+    });
+
+    $(".x").addEventListener("click", () => host.remove());
+
+    const hd = $(".hd");
+    let sx = 0, sy = 0, ox = 0, oy = 0, dragging = false;
+    hd.addEventListener("mousedown", (e) => {
+      dragging = true;
+      const r = host.getBoundingClientRect();
+      sx = e.clientX; sy = e.clientY; ox = r.left; oy = r.top;
+      host.style.right = "auto"; host.style.bottom = "auto";
+      host.style.left = ox + "px"; host.style.top = oy + "px";
+      e.preventDefault();
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      host.style.left = ox + (e.clientX - sx) + "px";
+      host.style.top = oy + (e.clientY - sy) + "px";
+    });
+    window.addEventListener("mouseup", () => { dragging = false; });
+
+    document.documentElement.appendChild(host);
+    log("面板已就绪（右下角）。粘入文字 → 点「填入」。");
+    return host;
+  }
+
+  window.__dshFill = { run, pickEditor, CFG, panel: buildPanel };
+  buildPanel();
+})();
