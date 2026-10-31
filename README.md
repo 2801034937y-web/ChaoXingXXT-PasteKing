@@ -3,7 +3,9 @@
 
 ## 一、工具效果
 
-![工具效果](图片地址)
+![工具效果](Picture.效果1)
+![工具效果](Picture.效果2)
+![工具效果](Picture.效果3)
 
 ## 二、实现原理
 学习通的“禁止粘贴”，本质是监听并阻止`paste`事件，而 粘贴王 通过将文本拆成单字逐个派发 `keydown` / `keypress` / `keyup`，用 `execCommand('insertText')` 写入，最后补发 `input` / `change` 事件，从而实现模拟用户键入
